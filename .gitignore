@@ -1,0 +1,6 @@
+# Written by Claude Code each time it loads the mod (API types for the editor and tsc)
+.claude-plugin/types/
+# A local design-hook cache: absolute paths and session ids
+.impeccable/
+node_modules/
+.DS_Store
