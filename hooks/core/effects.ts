@@ -1,4 +1,4 @@
-import type { Proc, Todos } from '../../types'
+import type { Proc, ProcState, Todos } from '../../types'
 import { CREATED, DELETED, EDITED, EDIT_TOOLS, READ, READ_TOOLS, deletedPaths, isInternal, keyOf, normalPath } from './files'
 import type { Place } from './files'
 import { todosFromWrite } from './main'
@@ -7,7 +7,7 @@ import { newProc } from './procs'
 export type Effect =
   | { kind: 'file'; key: string; mark: number }
   | { kind: 'proc'; proc: Proc }
-  | { kind: 'stop'; id: string }
+  | { kind: 'end'; id: string; state: ProcState; why: string }
   | { kind: 'todos'; todos: Todos }
   | { kind: 'todo-created'; id: string; subject: string }
   | { kind: 'todo-updated'; taskId: string; status: string; subject: string; activeForm: string }
@@ -61,7 +61,17 @@ export const effectsOf = (c: { tool: string; input: unknown; result: unknown; ag
   }
   if (tool === 'TaskStop') {
     const id = str(input.task_id) || str(input.shell_id)
-    if (id) out.push({ kind: 'stop', id })
+    if (id) out.push({ kind: 'end', id, state: 'Z', why: 'killed' })
+  }
+  // Only the model's own GetTask calls reach a hook: the engine splices its deliveries into the messages.
+  if (tool === 'GetTask' && str(input.taskId)) {
+    const id = str(input.taskId)
+    const status = str(result.status)
+    const code = /Exited with code (\d+)/.exec(str(result.statusMessage))?.[1]
+    const failed = code !== undefined && code !== '0' ? `exit ${code}` : obj(result.result).isError === true ? 'failed' : ''
+    if (status === 'cancelled') out.push({ kind: 'end', id, state: 'Z', why: 'killed' })
+    else if (status === 'failed') out.push({ kind: 'end', id, state: 'Z', why: 'failed' })
+    else if (status === 'completed') out.push({ kind: 'end', id, state: failed ? 'Z' : 'X', why: failed })
   }
 
   if (isMain && tool === 'TodoWrite') out.push({ kind: 'todos', todos: todosFromWrite(input.todos) })

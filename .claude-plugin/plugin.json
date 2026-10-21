@@ -1,6 +1,6 @@
 {
   "name": "glitchdeck",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A mod that docks a live pane beside your conversation: what Claude is doing right now, every agent, workflow and background task it started as a process you can open, how fast it is writing, and every prompt you sent, one click away from its place in the transcript",
   "author": {
     "name": "0hte",

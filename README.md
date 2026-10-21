@@ -28,8 +28,8 @@ No panels, no fills. Everything finished fades to gray, and only what is alive c
 | Kind | Comes from | Ends when |
 | --- | --- | --- |
 | agent | the Agent tool, foreground or background | its turn completes, its notification arrives, or the agent list says so |
-| workflow | the Workflow tool; a few of its agents nest under it while it runs | its task notification, or the next stop that no longer lists it |
-| shell | a Bash or PowerShell command run in the background, by the session or an agent | its task notification with the exit code, its agent's final answer when the command ends with it, or the next stop that no longer lists it |
+| workflow | the Workflow tool; a few of its agents nest under it while it runs | its task notification, TaskStop, or the next stop that no longer lists it |
+| shell | a Bash or PowerShell command run in the background, by the session or an agent | its task notification with the exit code, its agent's final answer when the command ends with it, TaskStop, Claude checking on it with GetTask, or the next stop that no longer lists it |
 | monitor | the Monitor tool | its task notification, TaskStop, or the next stop that no longer lists it |
 
 Live work comes first, with its last tool call under it. Finished work drops to one gray line; failed work keeps a red bar and says why (`exit 1`, `killed`). A row glitches for a moment when its state changes. Open one to swap the list for that process's live timeline: an agent's tool calls, tokens and last words, or a workflow's agents.
@@ -40,7 +40,7 @@ Before anything has run, main is its header with the model's name, and the files
 
 ## Install
 
-Built and tested on Claude Code 2.1.303 (mods are early access; the API moves between releases).
+Built on Claude Code 2.1.303 and last tested on 2.1.306 (mods are early access; the API moves between releases).
 
 glitchdeck needs the fullscreen layout. Turn it on in `~/.claude/settings.json`:
 
@@ -88,6 +88,7 @@ One option, set in `/config` or under `pluginConfigs` in your settings: `openOnS
 - Only work with a task id of its own can be stopped: background commands, monitors, workflows and background agents. A foreground agent ends with the turn, so the turn's own control is what stops it.
 - Jumping to a prompt works in the terminal's fullscreen layout, from the main conversation. The desktop app does not let a plugin scroll the transcript.
 - A resumed session rebuilds its history from the transcript file. Past 4 MiB, which a plugin cannot read, it falls back to the session's newest 4096 messages: those carry no times (rows show `--:--`) and jump by matching the prompt's text. When neither can be read, a toast says so.
+- Under a Team or Enterprise organization, or on a machine with managed settings (unless the organization's managed `prependPlugins` leaves it out), Claude Code's built-in security plugin keeps plugins you install away from the settings-hook events and from what is folded into a running turn, and says so in the transcript. There, a resumed session's history comes from its messages (after an in-session `/resume`, at your next prompt), and a background command, monitor or workflow whose notification arrives while Claude is working is never seen ending: it stays live until Claude checks on it with GetTask (commands only), or the session is cleared or resumed.
 - Workflow agents are not in Claude Code's agent list, so their timelines start when glitchdeck sees them and are not read back after a reload.
 - No tool reports a deletion, so a file counts as deleted when one of the main loop's shell commands names it to `rm`, `unlink`, `git rm`, `del` or `Remove-Item`. A folder or a glob counts as one, and a file deleted some other way, by a script for instance, is not counted.
 - The colors are tuned for dark terminals.

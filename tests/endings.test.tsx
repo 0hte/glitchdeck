@@ -152,6 +152,41 @@ test('a stop ends background work that is no longer in flight, and an absent lis
   await ui.unmount()
 })
 
+const exited = (code: number) => ({ status: 'completed', statusMessage: `Exited with code ${code}.`, result: { content: [], isError: code !== 0 } })
+
+test('a GetTask check ends a command that exited or was stopped, with its exit code; a working one runs on', async ($, on) => {
+  engine(on)
+  let n = 0
+  const answers: Record<string, object> = {
+    b1: { status: 'working' },
+    b2: exited(0),
+    b3: exited(3),
+    b4: { status: 'cancelled' },
+    b5: { status: 'failed', error: { code: 1, message: 'boom' } },
+  }
+  on('tool.call', (_$, e) => (e.tool === 'GetTask' ? { result: answers[(e as { taskId: string }).taskId] } : shell(`b${++n}`)))
+  for (let i = 0; i < 5; i++) await $.tool.call({ tool: 'Bash', command: 'sleep 1', run_in_background: true } as never)
+  for (const taskId of Object.keys(answers)) await $.tool.call({ tool: 'GetTask', taskId } as never)
+  const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+  expect(await ui.find({ text: /1 live · 5/ })).toBeDefined()
+  expect(await ui.find({ text: /exit 3/ })).toBeDefined()
+  expect(await ui.find({ text: /killed/ })).toBeDefined()
+  expect(await ui.find({ text: /failed/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a GetTask check never rewrites how a command already ended', async ($, on) => {
+  engine(on)
+  on('tool.call', (_$, e) => (e.tool === 'GetTask' ? { result: exited(3) } : shell('b1')))
+  await $.tool.call({ tool: 'Bash', command: 'npm test', run_in_background: true } as never)
+  await $.session.append({ ...folded('b1'), message: { ...folded('b1').message, content: [{ type: 'text' as const, text: note('b1', 'failed', 'Background command "x" failed with exit code 2') }] } })
+  await $.tool.call({ tool: 'GetTask', taskId: 'b1' } as never)
+  const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+  expect(await ui.find({ text: /exit 2/ })).toBeDefined()
+  expect(await ui.find({ text: /exit 3/ })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('a narrow, short pane shows what fits, folds the rest into +N more, and stays inside its rows and width', async ($, on) => {
   engine(on)
   for (const d of ['one', 'two', 'three', 'four', 'five']) await $.agent.spawn(spawn('Explore', `task ${d}`))

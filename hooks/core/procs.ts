@@ -69,6 +69,12 @@ export const setState = (list: readonly Proc[], id: string, state: ProcState, wh
       : { ...p, state, why, changedAt: now, endedAt: state === 'X' || state === 'Z' ? (p.endedAt ?? now) : null },
   )
 
+/** Ends a process that still runs; one that has ended keeps the reason it ended with. */
+export const endLive = (list: readonly Proc[], id: string, state: ProcState, why: string, now: number): readonly Proc[] => {
+  const p = list.find(x => x.id === id || x.taskId === id)
+  return p && isLive(p) ? setState(list, id, state, why, now) : list
+}
+
 type StepUsage = { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }
 
 /** One model request of an agent: its tokens, its words, and it is running again. */

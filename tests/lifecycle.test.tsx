@@ -101,6 +101,8 @@ const jsonl = [
   JSON.stringify({ type: 'user', uuid: 'u2', origin: { kind: 'task-notification' }, message: { role: 'user', content: '<task-notification>' } }),
 ].join('\n')
 
+const said = (text: string) => ({ role: 'user', text, toolUses: [] })
+
 test('a resumed session reads its prompts back from its transcript', async ($, on) => {
   world(on)
   on('fs.read', () => ({ value: jsonl }))
@@ -115,7 +117,7 @@ test("past what a plugin can read, the session's messages stand in; when both fa
   const w = world(on)
   let isReadable = true
   on('fs.read', () => ({ deny: 'over 4 MiB' }))
-  on('session.messages', () => (isReadable ? { value: [{ role: 'user', text: 'from the messages', toolUses: [] }] as never } : { deny: 'unavailable' }))
+  on('session.messages', () => (isReadable ? { value: [said('from the messages')] as never } : { deny: 'unavailable' }))
   await $.classic.SessionStart({ source: 'resume', transcript_path: 'C:\\big.jsonl' } as never)
   const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
   expect(await ui.find({ text: /from the messages/ })).toBeDefined()
@@ -125,15 +127,110 @@ test("past what a plugin can read, the session's messages stand in; when both fa
   expect(w.toasts.some(t => t.includes("couldn't read"))).toBe(true)
 })
 
+test("an in-session /resume that classic.SessionStart reaches keeps the transcript's prompts at the next one", async ($, on) => {
+  world(on)
+  on('fs.read', () => ({ value: jsonl }))
+  on('session.messages', () => ({ value: [said('from the messages')] as never }))
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  await $.session.end({ reason: 'resume', sessionId: 's1' } as never)
+  await $.classic.SessionStart({ source: 'resume', transcript_path: 'C:\\t.jsonl' } as never)
+  await $.prompt.submit({ text: 'next one', origin: { kind: 'composer' }, wait: false } as never).catch(() => undefined)
+  const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+  expect(await ui.find({ text: /from the file/ })).toBeDefined()
+  expect(await ui.find({ text: /from the messages/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('where classic.SessionStart never runs, a session started with messages reads its prompts back', async ($, on) => {
+  world(on)
+  on('session.messages', () => ({ value: [said('from the messages'), said('<task-notification>')] as never }))
+  await $.session.start(START)
+  const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+  expect(await ui.find({ text: /from the messages/ })).toBeDefined()
+  expect(await ui.find({ key: 'hist-2' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('unreadable messages stay quiet at a start, which may have none, and are told after a /resume', async ($, on) => {
+  const w = world(on)
+  on('session.messages', () => ({ deny: 'unavailable' }))
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  await $.session.start(START)
+  expect(w.toasts).toEqual([])
+  await $.session.end({ reason: 'resume', sessionId: 's1' } as never)
+  await $.prompt.submit({ text: 'next one', origin: { kind: 'composer' }, wait: false } as never).catch(() => undefined)
+  expect(w.toasts.some(t => t.includes("couldn't read"))).toBe(true)
+})
+
+test('a late read of the messages never replaces a history already written', async ($, on) => {
+  world(on)
+  let rows: object[] = []
+  on('session.messages', () => ({ value: rows as never }))
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  await $.session.start(START)
+  rows = [said('from the messages')]
+  await $.session.append(promptRow('00000000-0000-4000-8000-000000000005', 'typed first'))
+  await $.prompt.submit({ text: 'typed first', origin: { kind: 'composer' }, wait: false } as never).catch(() => undefined)
+  const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+  expect(await ui.find({ text: /typed first/ })).toBeDefined()
+  expect(await ui.find({ text: /from the messages/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('where classic.SessionStart never runs, messages that load after the start are read at the first prompt', async ($, on) => {
+  world(on)
+  let rows: object[] = []
+  on('session.messages', () => ({ value: rows as never }))
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  await $.session.start(START)
+  rows = [said('from before the restart')]
+  await $.prompt.submit({ text: 'first one', origin: { kind: 'composer' }, wait: false } as never).catch(() => undefined)
+  await $.session.append(promptRow('00000000-0000-4000-8000-000000000004', 'first one'))
+  const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+  expect(await ui.find({ text: /from before the restart/ })).toBeDefined()
+  expect(await ui.find({ text: /first one/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a reload keeps the history it has instead of reading it back', async ($, on) => {
+  world(on)
+  on('session.messages', () => ({ value: [said('from the messages')] as never }))
+  await $.session.append(promptRow('00000000-0000-4000-8000-000000000002', 'typed live'))
+  await $.session.start(START)
+  const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+  expect(await ui.find({ text: /typed live/ })).toBeDefined()
+  expect(await ui.find({ text: /from the messages/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('where classic.SessionStart never runs, an in-session /resume starts HISTORY over and reads the resumed prompts before the next one', async ($, on) => {
+  world(on)
+  let rows = [said('from the old session')]
+  on('session.messages', () => ({ value: rows as never }))
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  await $.session.start(START)
+  await $.session.end({ reason: 'resume', sessionId: 's1' } as never)
+  rows = [said('from the resumed session')]
+  const before = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+  expect(await before.find({ text: /from the old session/ })).toBeUndefined()
+  await before.unmount()
+  await $.prompt.submit({ text: 'next one', origin: { kind: 'composer' }, wait: false } as never).catch(() => undefined)
+  await $.session.append(promptRow('00000000-0000-4000-8000-000000000003', 'next one'))
+  const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+  expect(await ui.find({ text: /from the resumed session/ })).toBeDefined()
+  expect(await ui.find({ text: /next one/ })).toBeDefined()
+  expect(await ui.find({ key: 'hist-3' })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('a prompt read back without its row id finds its row by text once the row is drawn', async ($, on) => {
   const w = world(on)
-  on('fs.read', () => ({ deny: 'over 4 MiB' }))
-  on('session.messages', () => ({ value: [{ role: 'user', text: 'find me by text', toolUses: [] }] as never }))
+  on('session.messages', () => ({ value: [said('find me by text')] as never }))
   on('ui.render', { component: 'UserMessage' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
     return <Text>row</Text>
   })
-  await $.classic.SessionStart({ source: 'resume', transcript_path: 'C:\\big.jsonl' } as never)
+  await $.session.start(START)
   const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
   await ui.press({ key: 'hist-1' })
   expect(w.toasts.at(-1)).toMatch(/not drawn yet/)

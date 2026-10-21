@@ -36,6 +36,7 @@ import {
   detailItems,
   endCall,
   endChildren,
+  endLive,
   endMissing,
   endingOf,
   isLive,
@@ -127,6 +128,8 @@ let graphBeat = 0
 let graphWidth = graphCols(COLUMNS)
 // Whether the pane last drew the graph as a Raster, which the timer scrolls between redraws.
 let isGraphDrawn = false
+// Messages to read at the next prompt: a /resume that only session.end saw, or a start before they loaded.
+let pendingSeed: 'resume' | 'start' | undefined
 // What every response of the session streamed, a column per tick, and the responses streaming now.
 let flow = newFlow()
 const streams = new Set<Stream>()
@@ -239,7 +242,7 @@ const countChunk = (s: Stream, c: TurnStepChunk) => {
 async function applyEffect($: EngineInterface, x: Effect, now: number) {
   if (x.kind === 'file') await patchFiles($, f => markFile(f, x.key, x.mark))
   else if (x.kind === 'proc') await changeProcs($, ps => addProc(ps, x.proc))
-  else if (x.kind === 'stop') await changeProcs($, ps => setState(ps, x.id, 'Z', 'killed', now))
+  else if (x.kind === 'end') await changeProcs($, ps => endLive(ps, x.id, x.state, x.why, now))
   else if (x.kind === 'todos') await update($, todos, () => x.todos)
   else if (x.kind === 'todo-created') await update($, todos, t => todoCreated(t, x))
   else await update($, todos, t => todoUpdated(t, x))
@@ -257,6 +260,20 @@ async function resetSession($: EngineInterface) {
   await update($, files, () => ({}))
   for (const p of await read($, procs)) await $.state.set({ ...timeline, id: p.id }, { calls: [], total: 0 })
   await update($, procs, () => [])
+}
+
+/**
+ * The history from the session's messages, for when classic.SessionStart never ran: they carry no ids
+ * or times, so a history written meanwhile stays. Resolves true when there were no messages yet.
+ */
+async function seedHistory($: EngineInterface, isQuiet: boolean) {
+  const rows = await $.session.messages().catch(() => null)
+  if (!Array.isArray(rows)) {
+    if (!isQuiet) $.ui.toast("glitchdeck couldn't read this session's earlier prompts")
+    return false
+  }
+  if (rows.length > 0) await update($, history, h => (h.length === 0 ? promptsFromMessages(rows) : h))
+  return rows.length === 0
 }
 
 export const register: Register = (on, options) => {
@@ -292,6 +309,8 @@ export const register: Register = (on, options) => {
     // Picks up agents already running when the mod (re)loads.
     await pollAgents($).catch(() => undefined)
     if ((await read($, procs)).some(isLive)) ensurePoll($, now)
+    // A reload keeps the history it had; an empty one is a fresh, resumed or forked session's.
+    if ((await read($, history)).length === 0 && (await seedHistory($, true))) pendingSeed = 'start'
     const isOpen = (await $.ui.panes()).some(p => p.id === PANE)
     if (options.openOnStart !== false && !isOpen && !(await read($, view)).isClosed) void openPane($).catch(() => undefined)
     return started
@@ -310,7 +329,8 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'clear') {
+    pendingSeed = e.reason === 'resume' ? 'resume' : undefined
+    if (e.reason === 'clear' || e.reason === 'resume') {
       await resetSession($)
       drawn.clear()
       drawnByText.clear()
@@ -323,6 +343,7 @@ export const register: Register = (on, options) => {
   on('classic.SessionStart', async ($, e, next) => {
     const done = await next(e)
     if (e.source === 'resume' || e.source === 'fork') {
+      pendingSeed = undefined
       await resetSession($)
       drawn.clear()
       drawnByText.clear()
@@ -524,6 +545,11 @@ export const register: Register = (on, options) => {
   // A prompt typed at idle is kept from its row, which session.append sees before this resolves; one
   // typed over a running turn reaches the model inside that turn, so it is taken here. Slash commands do not count.
   on('prompt.submit', async ($, e, next) => {
+    if (pendingSeed) {
+      const isQuiet = pendingSeed === 'start'
+      pendingSeed = undefined
+      await seedHistory($, isQuiet)
+    }
     const entered = await next(e)
     const kind = e.origin.kind
     const text = entered.drop === undefined ? entered.text : ''
