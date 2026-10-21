@@ -1,14 +1,14 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, Timer, TurnStepChunk } from 'claude-code'
+import type { EngineInterface, Register, RenderSurface, Timer, TurnStepChunk, UiPressArgument } from 'claude-code'
 
-import type { ActivityKind, FileTouch, Fx, HistoryEntry, Main, Proc, Timeline, Todos, ToolState, View } from '../types'
+import type { ActivityKind, FileMarks, Fx, HistoryEntry, Main, Proc, SectionKey, Timeline, Todos, ToolState, View } from '../types'
 import { effectsOf } from './core/effects'
 import type { Effect } from './core/effects'
 import { closeColumn, credit, flowCols, newFlow, newStream, settle } from './core/flow'
 import type { Stream } from './core/flow'
 import { fmtClock } from './core/fmt'
 import { FRAME_MS, GLITCH_MS } from './core/glitch'
-import { allText, attachUuid, keepRow, promptText, promptsFromMessages, promptsFromTranscript, pushPrompt, rowKey, textKey } from './core/history'
+import { allText, attachUuid, keepRow, originalOf, promptText, promptsFromMessages, promptsFromTranscript, pushPrompt, rowKey, textKey } from './core/history'
 import { columnMs } from './core/graph'
 import { GRAPH_ROWS, layout } from './core/layout'
 import {
@@ -24,8 +24,9 @@ import {
   targetOf,
   todoCreated,
   todoUpdated,
-  touchFile,
 } from './core/main'
+import { internalRoots, markFile } from './core/files'
+import type { Place } from './core/files'
 import {
   addProc,
   applyList,
@@ -48,12 +49,13 @@ import {
   turnEnding,
   withBackfill,
 } from './core/procs'
+
 import { BREATH, BREATH_MS, C } from './palette'
 import { GRAPH_KEY, GRAPH_MIN_W, graphCells, graphCols, graphView } from './views/graph'
-import { HIST_PREFIX, historySection } from './views/history'
+import { COPY_SUFFIX, FILL_SUFFIX, HIST_PREFIX, histNumOf, historySection } from './views/history'
 import { mainSection, nowRows } from './views/main'
-import { PROC_PREFIX, detailSection, itemsSection, listSection, maxProcOffset, procIdOf, secondLine } from './views/procs'
-import type { Bar, Clock } from './views/section'
+import { PROC_PREFIX, STOP_SUFFIX, canStop, detailSection, itemsSection, listSection, maxProcOffset, procIdOf, secondLine } from './views/procs'
+import type { Bar, Clock, Fold } from './views/section'
 
 const PANE = 'glitchdeck'
 const COLUMNS = 60
@@ -64,9 +66,9 @@ const DEFAULT_VIEW: View = { histOffset: 0, agent: '', allProcs: false, procOffs
 // Each value keeps its own shape tag: bump only the one whose shape changed, and only it reads as absent.
 const history = atom({ plugin: 'glitchdeck', key: 'history' } as const, [] as readonly HistoryEntry[], { shape: 'v6' })
 const view = atom({ plugin: 'glitchdeck', key: 'view' } as const, DEFAULT_VIEW, { shape: 'v6' })
-const main = atom({ plugin: 'glitchdeck', key: 'main' } as const, DEFAULT_MAIN as Main, { shape: 'm9' })
+const main = atom({ plugin: 'glitchdeck', key: 'main' } as const, DEFAULT_MAIN as Main, { shape: 'm10' })
 const todos = atom({ plugin: 'glitchdeck', key: 'todos' } as const, DEFAULT_TODOS as Todos, { shape: 'v6' })
-const files = atom({ plugin: 'glitchdeck', key: 'files' } as const, [] as FileTouch[], { shape: 'f7' })
+const files = atom({ plugin: 'glitchdeck', key: 'files' } as const, {} as FileMarks, { shape: 'f8' })
 const procs = atom({ plugin: 'glitchdeck', key: 'procs' } as const, [] as readonly Proc[], { shape: 'p7' })
 const fx = atom({ plugin: 'glitchdeck', key: 'fx' } as const, { frame: 0 } as Fx, { shape: 'v6' })
 // A family: one value per process, written alone when that process calls a tool.
@@ -85,6 +87,10 @@ async function patchMain($: EngineInterface, change: (m: Main) => Main) {
 async function patchHistory($: EngineInterface, change: (h: readonly HistoryEntry[]) => readonly HistoryEntry[]) {
   const h = await read($, history)
   if (change(h) !== h) await update($, history, change)
+}
+async function patchFiles($: EngineInterface, change: (f: FileMarks) => FileMarks) {
+  const f = await read($, files)
+  if (change(f) !== f) await update($, files, change)
 }
 async function patchView($: EngineInterface, change: (v: View) => View) {
   const v = await read($, view)
@@ -107,6 +113,8 @@ async function isProc($: EngineInterface, id: string) {
 }
 
 // Timers die with the module on a reload; session.start, which fires again, restarts what is needed.
+// Where relative and internal paths are judged from; learned at session start, which a reload fires again.
+let place: Place = { cwd: '', home: '', roots: [] }
 let fxTimer: Timer | undefined
 let fxBeat = 0
 let glitchUntil = 0
@@ -229,7 +237,7 @@ const countChunk = (s: Stream, c: TurnStepChunk) => {
 }
 
 async function applyEffect($: EngineInterface, x: Effect, now: number) {
-  if (x.kind === 'file') await update($, files, list => touchFile(list, x, x.isEdit, now))
+  if (x.kind === 'file') await patchFiles($, f => markFile(f, x.key, x.mark))
   else if (x.kind === 'proc') await changeProcs($, ps => addProc(ps, x.proc))
   else if (x.kind === 'stop') await changeProcs($, ps => setState(ps, x.id, 'Z', 'killed', now))
   else if (x.kind === 'todos') await update($, todos, () => x.todos)
@@ -243,10 +251,10 @@ async function resetSession($: EngineInterface) {
   flow = newFlow()
   streams.clear()
   await update($, history, () => [])
-  await update($, view, v => ({ ...DEFAULT_VIEW, isClosed: v.isClosed }))
+  await update($, view, v => ({ ...DEFAULT_VIEW, isClosed: v.isClosed, collapsed: v.collapsed }))
   await update($, main, m => ({ ...DEFAULT_MAIN, model: m.model }))
   await update($, todos, () => DEFAULT_TODOS)
-  await update($, files, () => [])
+  await update($, files, () => ({}))
   for (const p of await read($, procs)) await $.state.set({ ...timeline, id: p.id }, { calls: [], total: 0 })
   await update($, procs, () => [])
 }
@@ -263,11 +271,21 @@ export const register: Register = (on, options) => {
     const started = await next(e)
     await $.command.register({
       name: 'glitchdeck',
-      description: 'Toggle the glitchdeck pane: what Claude is doing, its agents and your prompts',
+      description: 'Toggle the glitchdeck pane: what Claude is doing, the processes it started and your prompts',
       argumentHint: '[open|close]',
       immediate: true,
     })
     const [model, m, now] = await Promise.all([$.session.model().catch(() => ''), read($, main), $.clock.now()])
+    const [CLAUDE_CONFIG_DIR, HOME, USERPROFILE, TMPDIR, TEMP, TMP, cwd] = await Promise.all([
+      $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined),
+      $.env.get('HOME').catch(() => undefined),
+      $.env.get('USERPROFILE').catch(() => undefined),
+      $.env.get('TMPDIR').catch(() => undefined),
+      $.env.get('TEMP').catch(() => undefined),
+      $.env.get('TMP').catch(() => undefined),
+      $.session.cwd().catch(() => ''),
+    ])
+    place = { cwd, home: HOME || USERPROFILE || '', roots: internalRoots({ CLAUDE_CONFIG_DIR, HOME, USERPROFILE, TMPDIR, TEMP, TMP }) }
     if (model) await patchMain($, x => (x.model === model ? x : { ...x, model }))
     if (flow.cols.length === 0) flow = newFlow(m.flow)
     if (m.isRunning) await startGraph($)
@@ -354,7 +372,7 @@ export const register: Register = (on, options) => {
 
   on('turn.start', async ($, e, next) => {
     const now = await $.clock.now()
-    await update($, main, m => startTurn(m, now))
+    await update($, main, m => startTurn(m, now, e.turnId))
     await startGraph($)
     return next(e)
   })
@@ -400,6 +418,8 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', async ($, e, next) => {
+    // A call this mod raised itself is the person pressing a control, not work of the turn's.
+    if (next.origin.plugin === $.plugin.name) return next(e)
     const id = e.tool_use_id
     const tool = String(e.tool)
     const agentId = e.agentId
@@ -427,9 +447,10 @@ export const register: Register = (on, options) => {
     const state: ToolState = ran.deny !== undefined ? 'deny' : ran.isError ? 'err' : 'ok'
     const now = await settle(state)
     if (state !== 'ok') return ran
-    for (const x of effectsOf({ tool, input: e, result: ran.result, agentId, now })) await applyEffect($, x, now)
+    for (const x of effectsOf({ tool, input: e, result: ran.result, agentId, now, place })) await applyEffect($, x, now)
     return ran
   }).catch(($, e, next) => next(e))
+
 
   on('agent.spawn', async ($, e, next) => {
     const started = await next(e)
@@ -443,10 +464,13 @@ export const register: Register = (on, options) => {
       task: e.description,
       now,
       parent: runId || e.parentAgentId || '',
+      isBackground: e.background,
     })
     await changeProcs($, ps => {
       // A workflow's agents can start before its Workflow call has answered: hold a place for the run.
-      const withRun = runId && !ps.some(p => p.id === runId) ? addProc(ps, newProc({ id: runId, kind: 'workflow', type: 'workflow', task: '', now })) : ps
+      // No task id until the Workflow call answers, so nothing offers to stop the run before then.
+      const withRun =
+        runId && !ps.some(p => p.id === runId) ? addProc(ps, newProc({ id: runId, taskId: '', kind: 'workflow', type: 'workflow', task: '', now })) : ps
       return addProc(withRun, agent)
     })
     if (!runId) ensurePoll($, now)
@@ -525,11 +549,11 @@ export const register: Register = (on, options) => {
   // inside the press dispatch, not in the Button's onPress closure. Opening an agent reads its
   // conversation back once, for the calls it made before the mod loaded.
   on('ui.press', { plugin: 'glitchdeck' }, async ($, e, next) => {
-    if (e.element.startsWith(HIST_PREFIX)) {
-      const n = Number(e.element.slice(HIST_PREFIX.length))
-      const entry = (await read($, history)).find(p => p.n === n)
+    // The controls act from their own closures; a press on the row itself is the one that jumps or opens.
+    if (e.element.startsWith(HIST_PREFIX) && !e.element.endsWith(FILL_SUFFIX) && !e.element.endsWith(COPY_SUFFIX)) {
+      const entry = (await read($, history)).find(p => p.n === histNumOf(e.element))
       if (entry) await jumpTo($, entry, drawn, drawnByText)
-    } else if (e.element.startsWith(PROC_PREFIX)) {
+    } else if (e.element.startsWith(PROC_PREFIX) && !e.element.endsWith(STOP_SUFFIX)) {
       const id = procIdOf(e.element)
       const p = (await read($, procs)).find(x => x.id === id)
       if (p?.kind === 'agent' && !backfilled.has(id)) {
@@ -588,11 +612,13 @@ export const register: Register = (on, options) => {
 
     // Reading a timeline while drawing subscribes the pane to it: only the opened process's, its live
     // agents', and those of the live processes the short list can show are read.
+    const folded = v.collapsed ?? {}
+    // A folded section draws no process, so none of their calls needs to redraw the pane.
     const wanted = new Set<string>()
-    if (opened) {
+    if (opened && !folded.procs) {
       wanted.add(opened.id)
       for (const k of childrenOf(ps, opened.id)) if (isLive(k)) wanted.add(k.id)
-    } else if (!v.allProcs)
+    } else if (!v.allProcs && !folded.procs)
       for (const p of top.filter(isLive)) {
         wanted.add(p.id)
         if (p.kind === 'workflow') for (const k of shownKids(ps, p.id).shown) if (isLive(k)) wanted.add(k.id)
@@ -609,7 +635,6 @@ export const register: Register = (on, options) => {
         past: m.tools.length - runningCalls(m).length,
         hasTodo: t.items.length > 0,
         hasActive: t.active !== '',
-        hasFiles: f.length > 0,
         hasGraph: flow.cols.length > 0 && W >= GRAPH_MIN_W,
       },
       procs:
@@ -621,6 +646,7 @@ export const register: Register = (on, options) => {
               isList: v.allProcs,
             },
       history: hist.length,
+      collapsed: folded,
     })
 
     const raster = Raster ? (cols: number, cells: string) => <Raster key={GRAPH_KEY} columns={cols} rows={GRAPH_ROWS} cells={cells} /> : undefined
@@ -645,11 +671,33 @@ export const register: Register = (on, options) => {
     const openProc = (id: string) => () => void update($, view, x => ({ ...x, agent: x.agent === id ? '' : id }))
     const back = () => void update($, view, x => ({ ...x, agent: '' }))
     const toggleAll = () => void update($, view, x => ({ ...x, allProcs: !x.allProcs, procOffset: 0 }))
-    const shared = { list: ps, calls, now, clock, bar, onOpen: openProc, onAll: toggleAll }
+    // These three reach the engine and may put a dialog up: none of them holds the press dispatch.
+    const stopProcess = (id: string) => () => void stopProc($, id).catch(() => undefined)
+    const fillPrompt = (n: number) => () => void fillFrom($, n).catch(() => undefined)
+    const copyPrompt = (n: number) => (e: UiPressArgument) => void copyFrom($, n, e.surface).catch(() => undefined)
+    const abort = () => void abortTurn($, m.turnId).catch(() => undefined)
+    const fold = (key: SectionKey): Fold => ({
+      isCollapsed: folded[key] === true,
+      onToggle: () => void update($, view, x => ({ ...x, collapsed: { ...x.collapsed, [key]: !x.collapsed?.[key] } })),
+    })
+    const shared = { list: ps, calls, now, clock, bar, onOpen: openProc, onAll: toggleAll, onStop: stopProcess, fold: fold('procs') }
 
     return (
       <els.Box flexDirection="column" width={W}>
-        {mainSection(els, C, W, { m, todos: t, files: f, clock, bar, now, graph, pastRows: L.pastRows, showTodo: L.showTodo, showFiles: L.showFiles })}
+        {mainSection(els, C, W, {
+          m,
+          todos: t,
+          files: f,
+          clock,
+          bar,
+          now,
+          graph,
+          pastRows: L.pastRows,
+          showTodo: L.showTodo,
+          showFiles: L.showFiles,
+          onAbort: abort,
+          fold: fold('main'),
+        })}
         {L.procMode === 'detail' && opened
           ? detailSection(els, C, W, { ...shared, proc: opened, own, rows: L.detailRows, onBack: back })
           : L.procMode === 'list'
@@ -658,11 +706,78 @@ export const register: Register = (on, options) => {
               ? itemsSection(els, C, W, { ...shared, items: L.procItems })
               : null}
         {hist.length > 0
-          ? historySection(els, C, W, { list: hist, offset, rows: L.histRows, onNewer: page(-L.histRows), onOlder: page(L.histRows) })
+          ? historySection(els, C, W, { list: hist, offset, rows: L.histRows, onNewer: page(-L.histRows), onOlder: page(L.histRows), onFill: fillPrompt, onCopy: copyPrompt, fold: fold('history') })
           : null}
       </els.Box>
     )
   })
+}
+
+/** The engine asks the person first, as it does for the model's own call. */
+async function stopProc($: EngineInterface, id: string) {
+  const p = (await read($, procs)).find(x => x.id === id)
+  if (!p || !canStop(p)) return
+  let why = ''
+  try {
+    // The permission path reads `consent` as the person's own words: nothing the model wrote goes in it.
+    const ran = await $.tool.call({ tool: 'TaskStop', task_id: p.taskId, consent: `The user pressed stop on ${p.kind} ${p.taskId} in the glitchdeck pane` })
+    why = ran.deny !== undefined ? ran.deny || 'refused' : ran.isError ? 'it would not stop' : ''
+  } catch (err) {
+    why = (err instanceof Error && err.message) || 'the call failed'
+  }
+  if (why) {
+    $.ui.toast(`can't stop ${p.type}: ${why}`)
+    return
+  }
+  const now = await $.clock.now()
+  await changeProcs($, list => setState(list, p.id, 'Z', 'killed', now))
+}
+
+/** Ends the turn the control was drawn for: once another has started, the engine refuses the stale id. */
+async function abortTurn($: EngineInterface, turnId: string) {
+  if (!turnId) return
+  try {
+    await $.turn.abort({ turnId })
+  } catch (err) {
+    $.ui.toast(`can't stop this turn: ${err instanceof Error ? err.message : 'it is already over'}`)
+  }
+}
+
+/** The list keeps a filtered, cut copy: this is the prompt as it was sent, or null once a toast has said why not. */
+async function sentText($: EngineInterface, n: number, verb: string) {
+  const entry = (await read($, history)).find(p => p.n === n)
+  if (!entry) return null
+  const text = originalOf(await $.session.messages().catch(() => []), entry)
+  if (text === null) $.ui.toast(`can't ${verb} prompt ${n}: its full text is no longer in the session`)
+  return text
+}
+
+const COPY_REFUSED = { 'no-surface': 'nothing here has a clipboard', 'no-clipboard': 'the clipboard took nothing', refused: 'a plugin refused it' }
+
+async function copyFrom($: EngineInterface, n: number, surface: RenderSurface) {
+  const text = await sentText($, n, 'copy')
+  if (text === null) return
+  try {
+    const copied = await $.ui.copy({ text, surface })
+    $.ui.toast(copied.isCopied ? `copied prompt ${n}` : `can't copy prompt ${n}: ${COPY_REFUSED[copied.reason]}`)
+  } catch (err) {
+    $.ui.toast(`can't copy prompt ${n}: ${(err instanceof Error && err.message) || 'the copy failed'}`)
+  }
+}
+
+/** Puts a prompt back in the box at the cursor, so a draft already typed there survives it. */
+async function fillFrom($: EngineInterface, n: number) {
+  const text = await sentText($, n, 'reuse')
+  if (text === null) return
+  try {
+    const filled = await $.prompt.fill({ text, mode: 'insert' })
+    if (filled.isFilled) return
+    // An absent cause is a hook's own refusal, which says nothing about whether a box is drawn.
+    const why = filled.refusal === 'dialog' ? 'a dialog has the keys' : filled.refusal === 'no_composer' ? 'there is no prompt box here' : 'the box would not take it'
+    $.ui.toast(`can't reuse prompt ${n}: ${why}`)
+  } catch (err) {
+    $.ui.toast(`can't reuse prompt ${n}: ${err instanceof Error ? err.message : 'the box refused it'}`)
+  }
 }
 
 async function jumpTo($: EngineInterface, entry: HistoryEntry, drawn: Map<string, string>, drawnByText: Map<string, string>) {

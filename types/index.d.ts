@@ -7,11 +7,16 @@ export type HistoryEntry = {
   at: number
 }
 
+export type SectionKey = 'main' | 'procs' | 'history'
+
+export type Collapsed = Partial<Record<SectionKey, boolean>>
+
 /**
  * `agent`: the process whose timeline replaces the list, '' for the list. `allProcs`: every process
  * as a paged list instead. `isClosed`: the person closed the pane, so a reload does not reopen it.
+ * `collapsed`: the sections folded to their header; optional, so a view stored before it still reads.
  */
-export type View = { histOffset: number; agent: string; allProcs: boolean; procOffset: number; isClosed: boolean }
+export type View = { histOffset: number; agent: string; allProcs: boolean; procOffset: number; isClosed: boolean; collapsed?: Collapsed }
 
 export type ActivityKind = 'idle' | 'requesting' | 'thinking' | 'responding' | 'tool-input' | 'tool-use'
 
@@ -44,6 +49,8 @@ export type Main = {
   /** A copy of the graph's columns for a reload, written when it stops or first draws; the live ones stay in the module. */
   flow: FlowCols
   lastTurn: LastTurn | null
+  /** The running turn's id, what `$.turn.abort` takes; '' between turns. */
+  turnId: string
 }
 
 export type TodoStatus = 'pending' | 'in_progress' | 'completed'
@@ -53,8 +60,8 @@ export type Todo = { id: string; text: string; status: TodoStatus }
 /** `active`: what the in-progress task is doing, shown beside the gauge; `activeId` names that task. */
 export type Todos = { items: Todo[]; active: string; activeId: string }
 
-/** `key` stands for the whole path, which is not stored; `path` is its last two segments, as drawn. */
-export type FileTouch = { key: string; path: string; reads: number; edits: number; at: number }
+/** What the main loop did to each file it touched (READ, EDITED, CREATED, DELETED bits), by a hash of its path: no path is kept. */
+export type FileMarks = Record<string, number>
 
 export type ProcKind = 'agent' | 'workflow' | 'wfagent' | 'shell' | 'monitor'
 
@@ -83,6 +90,8 @@ export type Proc = {
   lastText: string
   /** A background command its agent's final answer ends, with no notification after it. */
   endsWithParent: boolean
+  /** An agent the session started in the background, which alone can be stopped by its id; absent on a process stored before this field. */
+  isBackground?: boolean
 }
 
 /**
@@ -100,7 +109,7 @@ declare module 'claude-code' {
       view: Shaped<View>
       main: Shaped<Main>
       todos: Shaped<Todos>
-      files: Shaped<FileTouch[]>
+      files: Shaped<FileMarks>
       procs: Shaped<readonly Proc[]>
       timeline: StateFamily<Timeline>
       fx: Shaped<Fx>

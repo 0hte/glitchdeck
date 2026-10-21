@@ -209,3 +209,62 @@ test('the drawn pane never takes more rows or columns than it has', async ($, on
       await ui.unmount()
     }
 })
+
+test('a question put to the person holds its bar still and keeps the accent', async ($, on) => {
+  const clock = mock.clock(on)
+  await clock.set(1_000_000)
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  let answer: () => void = () => {}
+  on('tool.call', () => new Promise(resolve => (answer = () => resolve({ result: {}, text: 'ok' }))))
+  const breathing = (tree: unknown) => {
+    const found: string[] = []
+    walk(tree, el => {
+      if (el.type === 'Client' && typeof el.props?.module === 'string') found.push(el.props.module)
+    })
+    return found.some(m => m.includes('breathe'))
+  }
+  await $.turn.start({ text: 'go', turnId: 'T1' })
+  const asked = $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
+  asked.catch(() => undefined)
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...pane(60, 60), surface: 'terminal' })
+  const main = byKey(await ui.drawn(), 'main')
+  expect(textOf(main)).toMatch(/waiting/)
+  // The bar is drawn, not animated, and stays in the accent: the turn is alive, and it is the person's move.
+  expect(breathing(main)).toBe(false)
+  expect(colorsIn(main)).toContain(C.accent)
+  await ui.unmount()
+
+  answer()
+  await asked
+  const after = await $.ui.mount({ ...pane(60, 60), surface: 'terminal' })
+  const answered = textOf(byKey(await after.drawn(), 'main'))
+  // Answered: the call is finished and its row's word is gone (MAIN's own line now waits for the model).
+  expect(answered).toMatch(/✓ AskUserQuestion/)
+  expect(answered).not.toMatch(/waiting {2}/)
+  await after.unmount()
+})
+
+test('each section folds to its header from its name and opens again, its status kept on the right', async ($, on) => {
+  await busy($, on)
+  const ui = await $.ui.mount({ ...pane(60, 60), surface: 'terminal' })
+  const status: Record<string, RegExp> = { main: /opus 5\.5/, procs: /\d+ live · \d+/, history: /prompts.*2/ }
+  for (const key of ['main', 'procs', 'history']) {
+    // A spaced section's margin counts as a row: its header alone is two.
+    const headerOnly = key === 'main' ? 1 : 2
+    const open = byKey(await ui.drawn(), key)
+    expect(textOf(open).trimStart(), key).toMatch(/^▾ /)
+    expect(heightOf(open), key).toBeGreaterThan(headerOnly)
+
+    await ui.press({ key: `fold-${key}` })
+    const folded = byKey(await ui.drawn(), key)
+    expect(textOf(folded).trimStart(), key).toMatch(/^▸ /)
+    expect(heightOf(folded), key).toBe(headerOnly)
+    expect(textOf(folded), key).toMatch(status[key]!)
+
+    await ui.press({ key: `fold-${key}` })
+    expect(heightOf(byKey(await ui.drawn(), key)), key).toBeGreaterThan(headerOnly)
+  }
+  await ui.unmount()
+})

@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 import { glitchText } from '../hooks/core/glitch'
-import { attachUuid, pushPrompt } from '../hooks/core/history'
+import { attachUuid, originalOf, pushPrompt } from '../hooks/core/history'
 import { DEFAULT_TODOS, todoCreated, todoUpdated, todosFromWrite } from '../hooks/core/main'
 import { cells, oneLine, redact, shorten, wrapLines } from '../hooks/core/text'
 import { pane, promptRow, spawn } from './kit'
@@ -29,6 +29,15 @@ test('a prompt taken at submit gets its row id once, exactly or inside the frami
     [2, 'u2'],
   ])
   expect(attachUuid(list, 'fix the build', 'u1', true)).toBe(list)
+})
+
+test('a prompt typed mid-turn is reused from the framing that carried it, even in the row of a tool result', () => {
+  const sent = 'and the tests\n\nboth suites'
+  const framed = (who: string) =>
+    `<system-reminder>\n${who} while you were working:\n${sent}\n\nThis is how Claude Code surfaces messages the user sends mid-turn. Address the message above as you continue this turn.\n</system-reminder>`
+  const entry = pushPrompt([], { uuid: '', text: sent, at: 1 })[0]!
+  expect(originalOf([{ role: 'user', text: framed('The user sent a new message'), toolResults: [{}] }], entry)).toBe(sent)
+  expect(originalOf([{ role: 'user', text: framed('Another Claude session sent a message'), toolResults: [{}] }], entry)).toBeNull()
 })
 
 test('wide glyphs and emoji are measured in cells, and long words wrap at spaces', () => {
@@ -153,8 +162,8 @@ test('hidden processes are one press away, either line of a live agent opens it,
   engine(on)
   for (let i = 1; i <= 8; i++) await $.agent.spawn(spawn('Explore', `task ${i}`))
   await $.tool.call({ tool: 'Grep', pattern: 'x', agentId: 'ag2' } as never)
-  // 10 rows: MAIN's header, the gap and header, five processes and the way back.
-  const ui = await $.ui.mount({ ...pane(60, 10), surface: 'terminal' })
+  // 12 rows: MAIN's header, blank and files line, the gap and header, five processes and the way back.
+  const ui = await $.ui.mount({ ...pane(60, 12), surface: 'terminal' })
   expect(await ui.find({ key: 'proc-ag8' })).toBeUndefined()
   await ui.press({ key: 'procs-all' })
   expect(await ui.find({ key: 'proc-ag1' })).toBeDefined()
@@ -176,11 +185,12 @@ test("MAIN's files line counts the main loop only", async ($, on) => {
   await $.agent.spawn(spawn('Explore', 'read things'))
   await $.tool.call({ tool: 'Read', file_path: '/repo/sub.ts', agentId: 'ag1' } as never)
   const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
-  expect(await ui.find({ text: /read ·/ })).toBeUndefined()
+  expect(await ui.find({ text: /^ *files 0 read · 0 edited · 0 created · 0 deleted$/ })).toBeDefined()
   await ui.unmount()
   await $.tool.call({ tool: 'Read', file_path: '/repo/main.ts' } as never)
   const after = await $.ui.mount({ ...pane(60), surface: 'terminal' })
-  expect(await after.find({ text: /1 read · 0 edited/ })).toBeDefined()
+  // Counts alone, every category even at zero, and no file named.
+  expect(await after.find({ text: /^ *files 1 read · 0 edited · 0 created · 0 deleted$/ })).toBeDefined()
   await after.unmount()
 })
 
@@ -191,6 +201,6 @@ test('an in-session /resume starts MAIN and PROCS over', async ($, on) => {
   await $.classic.SessionStart({ source: 'resume', transcript_path: 'C:\\nowhere.jsonl' } as never)
   const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
   expect(await ui.find({ key: 'proc-ag1' })).toBeUndefined()
-  expect(await ui.find({ text: /read ·/ })).toBeUndefined()
+  expect(await ui.find({ text: /files 0 read/ })).toBeDefined()
   await ui.unmount()
 })

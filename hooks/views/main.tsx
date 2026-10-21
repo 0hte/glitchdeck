@@ -1,13 +1,16 @@
 import type { RenderNode } from 'claude-code'
 
-import type { ActivityKind, FileTouch, Main, Todos } from '../../types'
+import type { ActivityKind, FileMarks, Main, Todos } from '../../types'
+import { countFiles } from '../core/files'
 import { fmtClock, fmtMs, plural, prettyModel } from '../core/fmt'
-import { runningCalls } from '../core/main'
+import { ALWAYS_WAITS, runningCalls } from '../core/main'
 import { cells, shorten } from '../core/text'
 import type { Palette } from '../palette'
 import { pastRow, runningRow } from './rows'
-import type { Bar, Clock, Els } from './section'
-import { blank, line, section } from './section'
+import type { Bar, Clock, Els, Fold } from './section'
+import { STOP, blank, control, line, section } from './section'
+
+export const ABORT_KEY = 'main-abort'
 
 const WAITING: Record<ActivityKind, string> = {
   idle: '',
@@ -31,7 +34,7 @@ export const mainSection = (
   d: {
     m: Main
     todos: Todos
-    files: readonly FileTouch[]
+    files: FileMarks
     clock: Clock
     bar: Bar
     now: number
@@ -41,6 +44,8 @@ export const mainSection = (
     pastRows: number
     showTodo: boolean
     showFiles: boolean
+    onAbort: () => void
+    fold: Fold
   },
 ): RenderNode => {
   const { Box, Text } = els
@@ -49,7 +54,8 @@ export const mainSection = (
 
   const running = runningCalls(m)
   const now: RenderNode[] = []
-  if (running.length > 0) now.push(...[...running].reverse().map(r => runningRow(els, C, W, r, d)))
+  if (running.length > 0)
+    now.push(...[...running].reverse().map(r => runningRow(els, C, W, r, { ...d, wait: ALWAYS_WAITS.has(r.tool) ? 'waiting' : '' })))
   else if (m.isRunning) {
     const words = a.kind === 'tool-input' && a.tool ? `preparing ${a.tool}…` : WAITING[a.kind] || 'working…'
     now.push(
@@ -104,46 +110,40 @@ export const mainSection = (
         </Text>,
       )
   }
-  if (d.showFiles && files.length > 0) {
-    const reads = files.filter(f => f.reads > 0).length
-    const edits = files.filter(f => f.edits > 0).length
+  const c = countFiles(files)
+  if (d.showFiles)
     extras.push(
       <Text wrap="truncate">
         <Text color={C.muted}>{'  files '}</Text>
-        <Text color={C.body}>{`${reads} read · ${edits} edited `}</Text>
-        {[...files]
-          .reverse()
-          .slice(0, 3)
-          .map(f => (
-            <Text color={f.edits > 0 ? C.body : C.muted}>{`  ${f.path.split('/').pop() ?? f.path}`}</Text>
-          ))}
+        <Text color={C.body}>{`${c.read} read · ${c.edited} edited · ${c.created} created · ${c.deleted} deleted`}</Text>
       </Text>,
     )
-  }
 
   // The model's name once it is known; the turn clock beside it while a turn runs.
   const model = m.model ? prettyModel(m.model).toLowerCase() : ''
+  // Only a turn this session saw start can be ended: `$.turn.abort` refuses any other id.
+  const canAbort = m.isRunning && m.turnId !== ''
   const right = m.isRunning ? (
     <Box>
       {model ? <Text color={C.muted}>{`${model} · `}</Text> : null}
       {clock('turn-clock', m.turnStartedAt, null, C.accent)}
+      {canAbort ? <Text> </Text> : null}
+      {canAbort ? control(els, C, ABORT_KEY, STOP, true, d.onAbort) : null}
     </Box>
   ) : model ? (
     <Text color={C.muted}>{model}</Text>
   ) : undefined
-  const rightW = m.isRunning ? (model ? cells(`${model} · `) : 0) + cells(fmtClock(d.now - m.turnStartedAt)) : cells(model)
+  const rightW = m.isRunning
+    ? (model ? cells(`${model} · `) : 0) + cells(fmtClock(d.now - m.turnStartedAt)) + (canAbort ? 1 + cells(STOP) : 0)
+    : cells(model)
 
   return section(els, C, {
     key: 'main',
     W,
-    name: (
-      <Text color={C.hi} bold>
-        main
-      </Text>
-    ),
-    nameW: 4,
+    title: 'main',
+    fold: d.fold,
     right,
     rightW,
-    rows: [...(d.graph ? [d.graph, blank(els)] : []), ...now, ...past, ...(extras.length > 0 ? [blank(els), ...extras] : [])],
+    rows: [...(d.graph ? [d.graph, blank(els)] : []), ...now, ...past, ...(extras.length > 0 && now.length + past.length > 0 ? [blank(els)] : []), ...extras],
   })
 }

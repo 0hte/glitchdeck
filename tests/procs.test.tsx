@@ -113,11 +113,14 @@ test('agents, a background shell and a workflow are listed, the workflow with it
       await ui.unmount()
     }
   }
-  // Types read lowercase; a workflow is named by its script, and its agents by their tasks.
+  // Each row opens with its kind; an agent is told by its type, a workflow by its script, and its agents by their tasks.
   const named = await $.ui.mount({ ...pane(60), surface: 'terminal' })
-  expect(await named.find({ type: 'Text', text: /^explore\s*$/ })).toBeDefined()
-  expect(await named.find({ type: 'Text', text: /^code-rev/ })).toBeDefined()
+  expect(await named.findAll({ type: 'Text', text: /^agent\s*$/ })).toHaveLength(2)
+  expect(await named.find({ type: 'Text', text: /^shell\s*$/ })).toBeDefined()
   expect(await named.find({ type: 'Text', text: /^workflow\s*$/ })).toBeDefined()
+  expect(await named.find({ type: 'Text', text: /^explore · map mod API$/ })).toBeDefined()
+  expect(await named.find({ type: 'Text', text: /^code-reviewer · audit hooks$/ })).toBeDefined()
+  expect(await named.find({ type: 'Text', text: /^npm run e2e$/ })).toBeDefined()
   expect(await named.find({ type: 'Text', text: /^review-changes$/ })).toBeDefined()
   expect(await named.find({ type: 'Text', text: /^bugs\s*$/ })).toBeDefined()
   expect((await named.find({ key: 'proc-wf_9' }))?.text).not.toMatch(/review the diff/)

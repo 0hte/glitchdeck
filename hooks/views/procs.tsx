@@ -1,23 +1,36 @@
 import type { RenderNode } from 'claude-code'
 
-import type { Proc, Timeline, ToolRow } from '../../types'
+import type { Proc, ProcKind, Timeline, ToolRow } from '../../types'
 import { fmtClock, fmtWall, plural } from '../core/fmt'
 import { glitchText } from '../core/glitch'
 import { childrenOf, isLive, kTokens, shownKids, topLevel, totalOf } from '../core/procs'
 import { cells, fit, shorten, wrapLines } from '../core/text'
 import type { Palette } from '../palette'
 import { pastRow, runningRow } from './rows'
-import type { Bar, Clock, Els, Tone } from './section'
-import { blank, control, line, section } from './section'
+import type { Bar, Clock, Els, Fold, Tone } from './section'
+import { STOP, blank, control, line, section } from './section'
 
 export const PROC_PREFIX = 'proc-'
 const BACK_KEY = 'procs-back'
+export const STOP_SUFFIX = '~stop'
 
 /** A process's id from any of its buttons' keys (`proc-<id>` or `proc-<id>~part`). */
 export const procIdOf = (element: string) => element.slice(PROC_PREFIX.length).split('~')[0] ?? ''
 
+/** TaskStop needs a task id: a foreground agent has none of its own, and a workflow's agents end with their run. */
+export const canStop = (p: Proc) =>
+  isLive(p) &&
+  p.taskId !== '' &&
+  (p.kind === 'shell' || p.kind === 'monitor' || p.kind === 'workflow' || (p.kind === 'agent' && p.parent === '' && p.isBackground === true))
+
 const TYPE_W = 10
 const KID_W = 8
+
+/** The column every row opens with, so an agent, a background command and a run never read alike. */
+const KIND: Record<ProcKind, string> = { agent: 'agent', wfagent: 'agent', shell: 'shell', monitor: 'monitor', workflow: 'workflow' }
+
+/** An agent is told from the others of its kind by its type; a command or a run by its own text. */
+const rowText = (p: Proc) => (p.kind === 'agent' || p.kind === 'wfagent' ? [p.type.toLowerCase(), p.task].filter(Boolean).join(' · ') : p.task || p.type)
 
 const toneOf = (p: Proc): Tone => (p.state === 'R' ? 'live' : p.state === 'S' ? 'wait' : p.state === 'Z' ? 'err' : 'none')
 
@@ -38,6 +51,8 @@ type Shared = {
   bar: Bar
   onOpen: (id: string) => () => void
   onAll: () => void
+  onStop: (id: string) => () => void
+  fold: Fold
 }
 
 /** The right side of a process row: why it waits or ended, then its clock, in the accent while it runs. */
@@ -46,14 +61,18 @@ const status = (els: Els, C: Palette, p: Proc, d: Shared) => {
   const word = p.state === 'S' ? 'waiting' : p.state === 'X' ? 'done' : p.state === 'Z' ? p.why || 'failed' : ''
   const wordColor = p.state === 'S' ? C.accent : p.state === 'Z' ? C.err : C.dim
   const time = p.startedAt > 0 ? fmtClock((p.endedAt ?? d.now) - p.startedAt) : '—'
+  // The stop sits before the clock, so clocks stay in one column whether or not a row carries one.
+  const isStoppable = canStop(p)
   return {
     node: (
       <Box>
         {word ? <Text color={wordColor}>{`${shorten(word, 12)}  `}</Text> : null}
+        {isStoppable ? control(els, C, `${PROC_PREFIX}${p.id}${STOP_SUFFIX}`, STOP, true, d.onStop(p.id)) : null}
+        {isStoppable ? <Text> </Text> : null}
         {d.clock(`proc-clock-${p.id}`, p.startedAt, p.endedAt, isLive(p) ? C.accent : C.dim)}
       </Box>
     ),
-    width: (word ? cells(shorten(word, 12)) + 2 : 0) + cells(time) + 1,
+    width: (word ? cells(shorten(word, 12)) + 2 : 0) + (isStoppable ? cells(STOP) + 1 : 0) + cells(time) + 1,
   }
 }
 
@@ -87,9 +106,9 @@ const item = (els: Els, C: Palette, W: number, p: Proc, d: Shared) => {
       els,
       <Button key={key} plain onPress={open}>
         <Text color={isLoud ? C.hi : C.muted} bold={isLoud}>
-          {fit(shorten(p.type.toLowerCase(), TYPE_W - 1), TYPE_W)}
+          {fit(KIND[p.kind], TYPE_W)}
         </Text>
-        <Text color={isLoud ? C.body : C.muted}>{glitchText(shorten(p.task || p.type, IW - TYPE_W - s.width - 1), p.id, p.changedAt, d.now)}</Text>
+        <Text color={isLoud ? C.body : C.muted}>{glitchText(shorten(rowText(p), IW - TYPE_W - s.width - 1), p.id, p.changedAt, d.now)}</Text>
       </Button>,
       s.node,
     ),
@@ -135,12 +154,7 @@ const header = (els: Els, C: Palette, top: readonly Proc[]) => {
   const live = top.filter(isLive).length
   const total = ` · ${top.length}`
   return {
-    name: (
-      <Text color={C.hi} bold>
-        agents
-      </Text>
-    ),
-    nameW: 6,
+    title: 'processes',
     right: (
       <Text>
         <Text color={live > 0 ? C.accent : C.muted}>{`${live} live`}</Text>
@@ -171,7 +185,7 @@ export const itemsSection = (els: Els, C: Palette, W: number, d: Shared & { item
   const shown = top.slice(0, d.items)
   const rows = shown.map(p => item(els, C, W, p, d))
   if (shown.length < top.length) rows.push(moreLine(els, C, top.slice(shown.length), d.onAll))
-  return section(els, C, { key: 'procs', W, isSpaced: true, ...header(els, C, top), rows })
+  return section(els, C, { key: 'procs', W, isSpaced: true, fold: d.fold, ...header(els, C, top), rows })
 }
 
 /** The furthest the full list pages: its last page full. */
@@ -199,9 +213,9 @@ export const listSection = (
             els,
             <Button key={`${PROC_PREFIX}${p.id}`} plain onPress={d.onOpen(p.id)}>
               <Text color={isLoud ? C.hi : C.muted} bold={isLoud}>
-                {fit(shorten(p.type.toLowerCase(), TYPE_W - 1), TYPE_W)}
+                {fit(KIND[p.kind], TYPE_W)}
               </Text>
-              <Text color={isLoud ? C.body : C.muted}>{shorten(p.task || p.type, W - 1 - TYPE_W - s.width - 1)}</Text>
+              <Text color={isLoud ? C.body : C.muted}>{shorten(rowText(p), W - 1 - TYPE_W - s.width - 1)}</Text>
             </Button>,
             s.node,
           )}
@@ -220,7 +234,7 @@ export const listSection = (
       {paging ? <Text color={C.dim}>{`${offset + 1}-${offset + shown.length} of ${top.length}`}</Text> : null}
     </Box>,
   )
-  return section(els, C, { key: 'procs', W, isSpaced: true, ...header(els, C, top), rows })
+  return section(els, C, { key: 'procs', W, isSpaced: true, fold: d.fold, ...header(els, C, top), rows })
 }
 
 /** One process opened: its task and numbers, its calls (or a workflow's agents), its last words. */
@@ -275,6 +289,7 @@ export const detailSection = (
     key: 'procs',
     W,
     isSpaced: true,
+    fold: d.fold,
     name: (
       <Button key={BACK_KEY} plain onPress={d.onBack}>
         <Text color={C.hi} bold>
@@ -287,10 +302,12 @@ export const detailSection = (
       <Box>
         <Text color={wordColor}>{shorten(word, 12)}</Text>
         <Text color={C.muted}>{' · '}</Text>
+        {canStop(p) ? control(els, C, `${PROC_PREFIX}${p.id}${STOP_SUFFIX}`, STOP, true, d.onStop(p.id)) : null}
+        {canStop(p) ? <Text> </Text> : null}
         {d.clock(`detail-clock-${p.id}`, p.startedAt, p.endedAt, C.muted)}
       </Box>
     ),
-    rightW: cells(shorten(word, 12)) + 3 + cells(time),
+    rightW: cells(shorten(word, 12)) + 3 + (canStop(p) ? cells(STOP) + 1 : 0) + cells(time),
     rows: [
       <Text color={C.hi} bold wrap="truncate">
         {` ${p.task || p.type}`}

@@ -56,6 +56,20 @@ export const pushPrompt = (
 /** How a prompt is matched to its drawn row when it was read back without an id. */
 export const textKey = (text: string) => [...oneLine(redact(text))].slice(0, PROMPT_CHARS).join('')
 
+// How the engine hands the model a prompt typed mid-turn, often in the row of the next tool result.
+const MID_TURN = /The user sent (?:a new )?message while you were working:\s*([\s\S]*?)(?:\n\nThis is how Claude Code surfaces|\s*<\/system-reminder>)/g
+
+const midTurn = (text: string) => [...text.matchAll(MID_TURN)].map(m => m[1] ?? '')
+
+/** The prompts a row carries: the row itself as typed, or each one typed mid-turn inside its framing. */
+const sentIn = (r: MessageRow) => [...((r.toolResults?.length ?? 0) === 0 ? [r.text] : []), ...midTurn(r.text)]
+
+/** A kept prompt's full text, from the session's rows; null unless exactly one distinct text matches its cut copy. */
+export const originalOf = (rows: readonly MessageRow[], entry: HistoryEntry): string | null => {
+  const found = new Set(rows.filter(r => r.role === 'user').flatMap(sentIn).filter(t => textKey(t) === entry.text))
+  return found.size === 1 ? ([...found][0] ?? null) : null
+}
+
 /**
  * Gives the newest prompt still waiting for an id the id of the row that carries it: the row as
  * typed (`exact`), or, for one typed mid-turn, the engine's framing of it, which contains its text.
@@ -83,9 +97,13 @@ type MessageRow = { role: string; text: string; toolResults?: readonly unknown[]
 export const promptsFromMessages = (rows: readonly MessageRow[]): readonly HistoryEntry[] => {
   let list: readonly HistoryEntry[] = []
   for (const r of rows) {
-    if (r.role !== 'user' || (r.toolResults?.length ?? 0) > 0 || !r.text.trim() || ENGINE_TEXT.test(r.text)) continue
-    const n = (list.at(-1)?.n ?? 0) + 1
-    list = [...list, { n, uuid: '', text: textKey(r.text), at: 0 }].slice(-HISTORY_CAP)
+    if (r.role !== 'user') continue
+    const typed = (r.toolResults?.length ?? 0) === 0 && !ENGINE_TEXT.test(r.text) ? [r.text] : []
+    for (const text of [...typed, ...midTurn(r.text)]) {
+      if (!text.trim()) continue
+      const n = (list.at(-1)?.n ?? 0) + 1
+      list = [...list, { n, uuid: '', text: textKey(text), at: 0 }].slice(-HISTORY_CAP)
+    }
   }
   return list
 }
@@ -98,6 +116,7 @@ type TranscriptRow = {
   origin?: { kind?: unknown }
   timestamp?: unknown
   message?: { content?: unknown }
+  attachment?: { type?: unknown; prompt?: unknown; origin?: { kind?: unknown } }
 }
 
 /** The typed prompts of a transcript file, for a resumed session: loads are not appends. */
@@ -111,10 +130,14 @@ export const promptsFromTranscript = (jsonl: string): readonly HistoryEntry[] =>
     } catch {
       continue
     }
-    if (row.type !== 'user' || row.isSidechain === true || row.isMeta === true || row.origin?.kind !== 'human') continue
-    if (typeof row.uuid !== 'string') continue
+    if (row.isSidechain === true || typeof row.uuid !== 'string') continue
+    // A prompt typed mid-turn is saved as the attachment that delivered it, never as a user row.
+    const queued = row.type === 'attachment' && row.attachment?.type === 'queued_command' && row.attachment.origin?.kind === 'human'
+    if (!queued && (row.type !== 'user' || row.isMeta === true || row.origin?.kind !== 'human')) continue
+    const text = promptText(queued ? row.attachment?.prompt : row.message?.content)
+    if (queued && text.trim().startsWith('/')) continue
     const at = typeof row.timestamp === 'string' ? Date.parse(row.timestamp) : 0
-    list = pushPrompt(list, { uuid: row.uuid, text: promptText(row.message?.content), at: Number.isNaN(at) ? 0 : at })
+    list = pushPrompt(list, { uuid: row.uuid, text, at: Number.isNaN(at) ? 0 : at })
   }
   return list
 }

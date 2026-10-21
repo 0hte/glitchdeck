@@ -9,7 +9,6 @@ import {
   DEFAULT_TODOS,
   endTool,
   endTurn,
-  fileOf,
   setActivity,
   startTool,
   startTurn,
@@ -17,8 +16,9 @@ import {
   todoCreated,
   todoUpdated,
   todosFromWrite,
-  touchFile,
 } from '../hooks/core/main'
+import { effectsOf } from '../hooks/core/effects'
+import { CREATED, DELETED, EDITED, READ, countFiles, deletedPaths, internalRoots, isInternal, markFile, normalPath } from '../hooks/core/files'
 import { pane } from './kit'
 
 // ---------------------------------------------------------------- pure behavior
@@ -49,6 +49,13 @@ test('parallel calls keep the header on the call still running', () => {
   expect(setActivity(m, { kind: 'requesting', tool: '', target: '' }, 99)).toBe(m)
 })
 
+test('a turn carries the id that can end it, and drops it when it ends', () => {
+  let m = startTurn(DEFAULT_MAIN, 1000, 'T1')
+  expect(m.turnId).toBe('T1')
+  m = endTurn(m, 2000, { durationMs: 1000, reason: 'answer' })
+  expect(m.turnId).toBe('')
+})
+
 test('targets are one redacted line', () => {
   expect(targetOf('Bash', { command: 'curl -H "Authorization: Bearer abcdefgh12345"\n api' })).not.toContain('abcdefgh')
   expect(targetOf('Read', { file_path: 'C:\\Users\\me\\proj\\src\\main.ts' })).toBe('src/main.ts')
@@ -69,15 +76,51 @@ test('todos follow TodoWrite and the task tools', () => {
   expect(t.items).toEqual([])
 })
 
-test('files count reads and edits once per file, two of one name in different folders stay two', () => {
-  let f = touchFile([], fileOf('/repo/packages/a/src/index.ts'), false, 1)
-  f = touchFile(f, fileOf('/repo/packages/b/src/index.ts'), false, 2)
-  f = touchFile(f, fileOf('/repo/packages/a/src/index.ts'), true, 3)
-  expect(f.map(x => [x.path, x.reads, x.edits])).toEqual([
-    ['src/index.ts', 1, 0],
-    ['src/index.ts', 1, 1],
-  ])
-  expect(JSON.stringify(f)).not.toContain('packages')
+test('files are counted once each, and a file the session made counts as created, not edited', () => {
+  let m = markFile({}, 'a', READ)
+  m = markFile(m, 'a', EDITED)
+  m = markFile(m, 'b', CREATED)
+  m = markFile(m, 'b', EDITED)
+  m = markFile(m, 'c', DELETED)
+  expect(markFile(m, 'a', READ)).toBe(m)
+  expect(countFiles(m)).toEqual({ read: 1, edited: 1, created: 1, deleted: 1 })
+})
+
+test('the paths a shell command deletes are read from its words', () => {
+  expect(deletedPaths('rm -rf dist build/cache && npm run build', false)).toEqual(['dist', 'build/cache'])
+  expect(deletedPaths('sudo rm "my file.txt" 2>/dev/null; unlink old.log', false)).toEqual(['my file.txt', 'old.log'])
+  expect(deletedPaths('git rm src/a.ts && git rm --cached src/b.ts', false)).toEqual(['src/a.ts'])
+  expect(deletedPaths('Remove-Item -Path out.txt -Force; del -Filter *.tmp notes.md', true)).toEqual(['out.txt', 'notes.md'])
+  expect(deletedPaths('echo rm is not run here && ls', false)).toEqual([])
+})
+
+test("Claude's own folders are left out, and paths are compared as the system compares them", () => {
+  const bs = String.fromCharCode(92)
+  const roots = internalRoots({ USERPROFILE: 'C:/Users/me', TEMP: 'C:/Users/me/AppData/Local/Temp' })
+  const place = { cwd: 'C:/repo', home: 'C:/Users/me' }
+  expect(isInternal(normalPath('C:/Users/me/AppData/Local/Temp/claude/x/scratchpad/a.md', place), roots)).toBe(true)
+  expect(isInternal(normalPath(['C:', 'Users', 'ME', '.claude', 'plans', 'p.md'].join(bs), place), roots)).toBe(true)
+  expect(isInternal(normalPath('~/.claude/settings.json', place), roots)).toBe(true)
+  // A project's own `.claude` folder is the project's.
+  expect(isInternal(normalPath('.claude/settings.json', place), roots)).toBe(false)
+  expect(normalPath('src/../src/./a.ts', place)).toBe(normalPath('C:/REPO/src/a.ts', place))
+})
+
+test("a file call says what it did to its file, a shell command what it deleted, and Claude's own files count for nothing", () => {
+  const place = { cwd: '/repo', home: '/home/me', roots: internalRoots({ HOME: '/home/me', TMPDIR: '/tmp' }) }
+  const marks = (tool: string, input: object, result: object = {}) =>
+    effectsOf({ tool, input, result, now: 0, place }).flatMap(x => (x.kind === 'file' ? [x.mark] : []))
+  expect(marks('Read', { file_path: '/repo/a.ts' })).toEqual([READ])
+  expect(marks('Write', { file_path: '/repo/new.ts' }, { type: 'create' })).toEqual([CREATED])
+  expect(marks('Write', { file_path: '/repo/a.ts' }, { type: 'update' })).toEqual([EDITED])
+  expect(marks('Edit', { file_path: '/repo/b.ts' }, { originalFile: null })).toEqual([CREATED])
+  expect(marks('Edit', { file_path: '/repo/a.ts' }, { originalFile: 'x' })).toEqual([EDITED])
+  expect(marks('Bash', { command: 'rm a.ts b.ts' })).toEqual([DELETED, DELETED])
+  // Sent to the background, the command has not run when its call answers.
+  expect(marks('Bash', { command: 'rm a.ts', run_in_background: true }, { backgroundTaskId: 'b1' })).toEqual([])
+  expect(marks('Write', { file_path: '/home/me/.claude/plans/p.md' }, { type: 'create' })).toEqual([])
+  expect(marks('Write', { file_path: '/tmp/claude/s/scratchpad/n.md' }, { type: 'create' })).toEqual([])
+  expect(effectsOf({ tool: 'Read', input: { file_path: '/repo/a.ts' }, result: {}, agentId: 'ag1', now: 0, place })).toEqual([])
 })
 
 test('formatting', () => {

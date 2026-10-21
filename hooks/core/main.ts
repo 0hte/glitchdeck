@@ -1,8 +1,7 @@
-import type { Activity, ActivityKind, FileTouch, LastTurn, Main, Todo, Todos, ToolRow, ToolState } from '../../types'
-import { hash, oneLine, redact, shorten } from './text'
+import type { Activity, ActivityKind, LastTurn, Main, Todo, Todos, ToolRow, ToolState } from '../../types'
+import { oneLine, redact, shorten } from './text'
 
 export const TOOLS_CAP = 50
-export const FILES_CAP = 300
 export const TODOS_CAP = 60
 
 export const IDLE: Activity = { kind: 'idle', tool: '', target: '', since: 0 }
@@ -15,16 +14,18 @@ export const DEFAULT_MAIN: Main = {
   tools: [],
   flow: { cols: [], ms: [] },
   lastTurn: null,
+  turnId: '',
 }
 
 export const DEFAULT_TODOS: Todos = { items: [], active: '', activeId: '' }
 
 // ---------------------------------------------------------------- activity
 
-export const startTurn = (m: Main, now: number): Main => ({
+export const startTurn = (m: Main, now: number, turnId = ''): Main => ({
   ...m,
   isRunning: true,
   turnStartedAt: now,
+  turnId,
   tools: [],
   activity: { ...IDLE, kind: 'requesting', since: now },
 })
@@ -37,8 +38,11 @@ export const endTurn = (m: Main, now: number, t: { durationMs: number; reason: s
     reason: t.reason,
     endedAt: now,
   }
-  return { ...m, isRunning: false, activity: { ...IDLE, since: now }, lastTurn }
+  return { ...m, isRunning: false, turnId: '', activity: { ...IDLE, since: now }, lastTurn }
 }
+
+// Their run is the question itself. A permission prompt is not marked: nothing reports its answer before the call ends.
+export const ALWAYS_WAITS = new Set(['AskUserQuestion', 'ExitPlanMode'])
 
 /** A step's chunk kind as the activity it shows; undefined keeps the current one. */
 export const kindOfChunk = (kind: string): ActivityKind | undefined =>
@@ -141,27 +145,4 @@ export const todoUpdated = (t: Todos, u: { taskId: string; status?: string; subj
   if (u.status === 'in_progress') return { items, active: shorten(redact(u.activeForm || item?.text || ''), 120), activeId: u.taskId }
   if (u.status === 'completed' && t.activeId === u.taskId) return { items, active: '', activeId: '' }
   return { ...t, items }
-}
-
-// ---------------------------------------------------------------- files
-
-export const READ_TOOLS = new Set(['Read'])
-export const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit', 'MultiEdit'])
-
-/** A file as its key and its drawn name: two files of one name in different folders stay two. */
-export const fileOf = (full: string) => {
-  const p = oneLine(full).replace(/\\/g, '/')
-  return { key: hash(p).toString(36), path: redact(shortPath(p)) }
-}
-
-export const touchFile = (list: readonly FileTouch[], file: { key: string; path: string }, isEdit: boolean, now: number): FileTouch[] => {
-  const had = list.find(f => f.key === file.key)
-  const next: FileTouch = {
-    key: file.key,
-    path: file.path,
-    reads: (had?.reads ?? 0) + (isEdit ? 0 : 1),
-    edits: (had?.edits ?? 0) + (isEdit ? 1 : 0),
-    at: now,
-  }
-  return [...list.filter(f => f.key !== file.key), next].slice(-FILES_CAP)
 }

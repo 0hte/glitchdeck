@@ -21,9 +21,11 @@ export const newProc = (p: {
   taskId?: string
   parent?: string
   endsWithParent?: boolean
+  isBackground?: boolean
 }): Proc => ({
   id: p.id,
   taskId: p.taskId ?? p.id,
+  isBackground: p.isBackground,
   kind: p.kind,
   parent: p.parent ?? '',
   type: shorten(p.type, 40),

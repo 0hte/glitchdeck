@@ -231,3 +231,70 @@ test("opening an agent that ran before the mod loaded reads its calls back, once
   expect(reads).toBe(1)
   await ui.unmount()
 })
+
+const shell = (id: string) => ({ result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: id } })
+
+test("a stop control kills the row it sits on, and the turn's receipt does not count the press", async ($, on) => {
+  const w = world(on)
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('tool.call', (_$, e) => (e.tool === 'TaskStop' ? { result: { message: 'stopped', task_id: 'b1', task_type: 'bash' } } : shell('b1')))
+  await $.session.start(START)
+  await $.turn.start({ text: 'go', turnId: 'T1' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'sleep 120', run_in_background: true } as never)
+  const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+  expect(await ui.find({ key: 'proc-b1~stop' })).toBeDefined()
+  await ui.press({ key: 'proc-b1~stop' })
+  await w.clock.settle()
+  expect(await ui.find({ text: /killed/ })).toBeDefined()
+  await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 'T1', reason: 'answer' } as never)
+  // The press raised a call of its own: the turn counts the command it ran, not the button.
+  expect(await ui.find({ text: /1 tool$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('only work that can be stopped carries the control', async ($, on) => {
+  const w = world(on)
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('tool.call', (_$, e) =>
+    e.tool === 'Workflow' ? { result: { status: 'async_launched', taskId: 'wt9', runId: 'wf_9', workflowName: 'review' } } : shell('b1'),
+  )
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: 'ag1' }))
+  await $.session.start(START)
+  await $.turn.start({ text: 'go', turnId: 'T1' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'sleep 120', run_in_background: true } as never)
+  await $.agent.spawn(spawn('Explore', 'map the mod', { workflow: { runId: 'wf_9', agentIndex: 1 } }) as never)
+  const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+  expect(await ui.find({ key: 'proc-b1~stop' })).toBeDefined()
+  // The run's agents came first: until its Workflow call answers, it has no task id to stop it by.
+  expect(await ui.find({ key: 'proc-wf_9~stop' })).toBeUndefined()
+  // A workflow's agent ends with its run and has no task id of its own.
+  expect(await ui.find({ key: 'proc-ag1~stop' })).toBeUndefined()
+  await $.tool.call({ tool: 'Workflow', name: 'review' } as never)
+  expect(await ui.find({ key: 'proc-wf_9~stop' })).toBeDefined()
+  await w.clock.settle()
+  await ui.unmount()
+})
+
+test('the turn control stops the running turn, and says so when the turn is already gone', async ($, on) => {
+  const w = world(on)
+  const aborted: string[] = []
+  let isGone = false
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('turn.abort', (_$, e) => {
+    if (isGone) return { deny: 'T1 is not the running turn' }
+    aborted.push(e.turnId)
+    return { value: undefined }
+  })
+  await $.session.start(START)
+  await $.turn.start({ text: 'go', turnId: 'T1' } as never)
+  const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+  await ui.press({ key: 'main-abort' })
+  await w.clock.settle()
+  expect(aborted).toEqual(['T1'])
+  isGone = true
+  await ui.press({ key: 'main-abort' })
+  await w.clock.settle()
+  expect(w.toasts.at(-1)).toMatch(/can't stop this turn/)
+  await ui.unmount()
+})
